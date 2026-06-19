@@ -1,0 +1,120 @@
+name: Release
+
+on:
+  release:
+    types: [published]
+
+env:
+  # Pinned stellar-cli revision used to build the host CLI.
+  STELLAR_CLI_REV: 7d8c77547f04419af3ce83b42697cda2693cddb9
+  # Digest-pinned container image used for the verifiable build.
+  VERIFIABLE_IMAGE: docker.io/stellar/stellar-cli@sha256:c1297d0c2c6790dda6afaa3edd39a959ec12edd6ebe30282dd1d7a663e7c4109
+
+jobs:
+  build-cli:
+    name: Build stellar-cli
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Cache stellar-cli
+        id: cache-cli
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/stellar
+          key: stellar-cli-${{ env.STELLAR_CLI_REV }}
+
+      - name: Install stellar-cli
+        if: steps.cache-cli.outputs.cache-hit != 'true'
+        run: |
+          # Deps mirror stellar-cli's install.sh `--install-deps` apt list.
+          sudo apt-get update
+          sudo apt-get install -y \
+            libdbus-1-dev libudev-dev pkg-config libssl-dev build-essential
+          cargo install --locked \
+            --git https://github.com/stellar/stellar-cli \
+            --rev "${STELLAR_CLI_REV}" \
+            stellar-cli
+
+      - name: Upload stellar-cli artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: stellar-cli
+          path: ~/.cargo/bin/stellar
+          if-no-files-found: error
+          retention-days: 1
+
+  archive-source:
+    name: Archive source
+    needs: build-cli
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ github.event.release.tag_name }}
+      ARCHIVE_NAME: ${{ github.event.repository.name }}-${{ github.event.release.tag_name }}-source.tar.gz
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download stellar-cli
+        uses: actions/download-artifact@v4
+        with:
+          name: stellar-cli
+          path: /tmp/cli
+
+      - name: Install stellar-cli to PATH
+        run: |
+          mkdir -p "$HOME/.cargo/bin"
+          mv /tmp/cli/stellar "$HOME/.cargo/bin/stellar"
+          chmod +x "$HOME/.cargo/bin/stellar"
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Create source archive
+        run: |
+          stellar contract archive --out-file "${ARCHIVE_NAME}"
+
+      - name: Upload source archive to release
+        run: |
+          gh release upload "${TAG}" "${ARCHIVE_NAME}" --clobber
+
+  build-contract:
+    name: Build contract
+    needs: [build-cli, archive-source]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ github.event.release.tag_name }}
+      ARCHIVE_NAME: ${{ github.event.repository.name }}-${{ github.event.release.tag_name }}-source.tar.gz
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download stellar-cli
+        uses: actions/download-artifact@v4
+        with:
+          name: stellar-cli
+          path: /tmp/cli
+
+      - name: Install stellar-cli to PATH
+        run: |
+          mkdir -p "$HOME/.cargo/bin"
+          mv /tmp/cli/stellar "$HOME/.cargo/bin/stellar"
+          chmod +x "$HOME/.cargo/bin/stellar"
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Build verifiable contract
+        env:
+          SOURCE_URI: ${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.event.release.tag_name }}/${{ env.ARCHIVE_NAME }}
+        run: |
+          stellar contract build \
+            --verifiable \
+            --image "${VERIFIABLE_IMAGE}" \
+            --source-uri="${SOURCE_URI}" \
+            --out-dir ./out
+
+      - name: Upload wasm to release
+        run: |
+          gh release upload "${TAG}" ./out/*.wasm --clobber
