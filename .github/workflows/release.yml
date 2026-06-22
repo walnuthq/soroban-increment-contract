@@ -5,47 +5,50 @@ on:
     types: [published]
 
 env:
-  # Pinned stellar-cli revision used to build the host CLI.
-  STELLAR_CLI_REV: 93e1b1671f14830662766c005138b19095fe9307
   # Digest-pinned container image used for the verifiable build.
   VERIFIABLE_IMAGE: docker.io/stellar/stellar-cli@sha256:c1297d0c2c6790dda6afaa3edd39a959ec12edd6ebe30282dd1d7a663e7c4109
 
 jobs:
-  build-cli:
-    name: Build stellar-cli
+  fetch-cli:
+    name: Fetch stellar-cli
     runs-on: ubuntu-latest
-    permissions: {}
+    # Read other workflow runs so we can pull their artifacts.
+    permissions:
+      actions: read
+    env:
+      GH_TOKEN: ${{ github.token }}
     steps:
-      - name: Cache stellar-cli
-        id: cache-cli
-        uses: actions/cache@v5
-        with:
-          path: ~/.cargo/bin/stellar
-          key: stellar-cli-${{ env.STELLAR_CLI_REV }}
-
-      - name: Install stellar-cli
-        if: steps.cache-cli.outputs.cache-hit != 'true'
+      - name: Download stellar-cli from latest build-cli run
         run: |
-          # Deps mirror stellar-cli's install.sh `--install-deps` apt list.
-          sudo apt-get update
-          sudo apt-get install -y \
-            libdbus-1-dev libudev-dev pkg-config libssl-dev build-essential
-          cargo install --locked \
-            --git https://github.com/stellar/stellar-cli \
-            --rev "${STELLAR_CLI_REV}" \
-            stellar-cli
+          mkdir -p /tmp/cli
+          RUN_ID=$(gh run list \
+            --repo "${GITHUB_REPOSITORY}" \
+            --workflow build-cli.yml \
+            --status success \
+            --limit 1 \
+            --json databaseId \
+            --jq '.[0].databaseId')
+          if [ -z "$RUN_ID" ]; then
+            echo "No successful 'Build stellar-cli' run found. Run that workflow manually first." >&2
+            exit 1
+          fi
+          echo "Using stellar-cli from build-cli run ${RUN_ID}"
+          gh run download "$RUN_ID" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --name stellar-cli \
+            --dir /tmp/cli
 
-      - name: Upload stellar-cli artifact
+      - name: Re-upload stellar-cli for this run
         uses: actions/upload-artifact@v7
         with:
           name: stellar-cli
-          path: ~/.cargo/bin/stellar
+          path: /tmp/cli/stellar
           if-no-files-found: error
           retention-days: 1
 
   archive-source:
     name: Archive source
-    needs: build-cli
+    needs: fetch-cli
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -80,7 +83,7 @@ jobs:
 
   build-contract:
     name: Build contract
-    needs: [build-cli, archive-source]
+    needs: [fetch-cli, archive-source]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -110,6 +113,7 @@ jobs:
           SOURCE_URI: ${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.event.release.tag_name }}/${{ env.ARCHIVE_NAME }}
         run: |
           stellar contract build \
+            --manifest-path "${GITHUB_WORKSPACE}/Cargo.toml" \
             --verifiable \
             --image "${VERIFIABLE_IMAGE}" \
             --source-uri="${SOURCE_URI}"

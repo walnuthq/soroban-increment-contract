@@ -1,0 +1,49 @@
+name: Build stellar-cli
+
+# Manually-triggered, infrequent build of the host stellar-cli.
+# Re-run this only when the pinned revision changes; releases reuse the
+# artifact it uploads instead of rebuilding the CLI every time.
+on:
+  workflow_dispatch:
+    inputs:
+      revision:
+        description: stellar-cli git revision to build
+        required: true
+        default: 93e1b1671f14830662766c005138b19095fe9307
+
+jobs:
+  build-cli:
+    name: Build stellar-cli
+    runs-on: ubuntu-latest
+    permissions: {}
+    env:
+      STELLAR_CLI_REV: ${{ inputs.revision }}
+    steps:
+      - name: Cache stellar-cli
+        id: cache-cli
+        uses: actions/cache@v5
+        with:
+          path: ~/.cargo/bin/stellar
+          key: stellar-cli-${{ inputs.revision }}
+
+      - name: Install stellar-cli
+        if: steps.cache-cli.outputs.cache-hit != 'true'
+        run: |
+          # Deps mirror stellar-cli's install.sh `--install-deps` apt list.
+          sudo apt-get update
+          sudo apt-get install -y \
+            libdbus-1-dev libudev-dev pkg-config libssl-dev build-essential
+          cargo install --locked \
+            --git https://github.com/stellar/stellar-cli \
+            --rev "${STELLAR_CLI_REV}" \
+            stellar-cli
+
+      - name: Upload stellar-cli artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: stellar-cli
+          path: ~/.cargo/bin/stellar
+          if-no-files-found: error
+          # Keep it around long enough to span many releases. Re-run this
+          # workflow before it expires (or whenever the revision changes).
+          retention-days: 90
