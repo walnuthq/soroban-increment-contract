@@ -112,9 +112,8 @@ jobs:
           stellar contract build \
             --verifiable \
             --image "${VERIFIABLE_IMAGE}" \
-            --source-uri="${SOURCE_URI}" \
-            --out-dir ./out
+            --source-uri="${SOURCE_URI}"
 
       - name: Upload wasm to release
         run: |
-          gh release upload "${TAG}" ./out/*.wasm --clobber
+          gh release upload "${TAG}" ./target/wasm32v1-none/release/*.wasm --clobber
